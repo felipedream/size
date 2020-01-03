@@ -1,0 +1,224 @@
+
+<!DOCTYPE html>
+
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8" />
+    <link rel="shortcut icon" type="image/x-icon" href="/api/favicon.ico" />
+    <script language="JScript" type="text/Javascript" src="/api/js/jquery-1.8.3.min.js"></script>   
+    <script language="JScript" type="text/Javascript" src="/api/js/jquery-ui-1.8.24.custom.min.js"></script>
+    <script language="JScript" type="text/Javascript" src="/api/js/jquery.form.min.js"></script>
+    <script language="JScript" type="text/Javascript" src="/api/js/jquery.autoResize.js"></script>
+    <script language="JScript" type="text/Javascript" src="/api/js/timepicker.js"></script>
+    <link rel="stylesheet" type="text/css" href="/api/DataContract/datacontract.autoform.css">
+    <script language="JScript" type="text/Javascript" src="/api/DataContract/datacontract.autoform.js"></script>
+    <style>
+        .error {
+            color: #FF0000;
+        }
+        
+        td.form-result {
+            border-bottom-right-radius: 10px;
+            background-color: #999999;
+            padding: 5px;
+        }
+
+        #busy_overlay {
+            background: url("Compac_wait.gif") no-repeat scroll center center #FFF;
+            position: fixed;
+            opacity: 0.3;
+            z-index: 10;
+            height: 100%;
+            width: 100%;
+        }
+    </style>
+    <title>SizerService -- Compac Arbitrary Web Execution</title>
+</head>
+<body>   
+    <div id="busy_overlay"></div>
+    <table>
+        <tr>
+            <td>
+                <div id="content"></div>
+            </td>
+        </tr>
+    </table>
+    <script type="text/javascript">
+       
+        
+        $(function () {
+            //first load the meta-data
+            var baseurl = 'Sizer/';
+            //var baseurl = '~Test/';
+            $.ajax({
+                url: baseurl,
+                type: "GET",
+                dataType: 'json',
+                timeout: 10000,
+                success: function (o) {
+                    var dataContracts = o.DataContracts;
+                    var ops = o.OperationContracts;
+                    for (var opName in ops) {
+                        var desc = ops[opName];
+                        var form = $("<form method='" + desc.httpMethod + "' action='" + baseurl + opName + "' ></form>").appendTo("#content");
+                        var div = $(expander_af).clone().appendTo(form);
+
+                        $(div).find(".expando-header_af").html(opName + " <input style='margin-left:30px' type='submit' value='" + desc.httpMethod + "' />"
+                            + " times per minute: <input class='timesperminute' style='width:40px' />");
+
+                        var table = $("<table><tr><td class='args-header_af'>Arguments</td><td class='form-args_af'></td></tr><tr class='collapsed_af'><td class='result-header_af'>Result</td><td class='form-result'></td></tr></table>").appendTo($(div).find(".expando-content_af"));
+                        var argTable = $("<table></table>").appendTo(table.find(".form-args_af"));
+
+                        if (desc.args.length == 0) table.find("tr").first().hide();
+                        for (var argName in desc.args) {
+                            var tr = $("<tr><td class='argName_af'>" + argName + "</td><td class='argValue_af'></td></tr>").appendTo(argTable);
+                            var dataType = desc.args[argName];                            
+                            tr.find('.argValue_af').append(createArgElement(argName, dataContracts, dataType));                            
+                        }
+                        HandleFormSubmit(form, desc, dataContracts);
+                    }
+                    $("#busy_overlay").hide();
+                },
+                error: function (xmlRequestResponse, status) { //it timed out... metadata service not available
+                    $("#content").append("MetaData not available at url " + baseurl + ". To correct, make sure ServiceContractAdapterModule.ExposeMetaData = true");
+                    $("#busy_overlay").hide();
+                }
+            });
+        });
+
+        function toRequest(name,arr, dataType, dataContracts) {
+            var res = {};
+            if (!arr.length) return null;
+            if (dataType.indexOf("Array[") === 0) {                
+                var arrayTypes = dataType.substring("Array[".length, dataType.length - 1);
+                arrayTypes = (arrayTypes.indexOf("Array[") === 0) ? [arrayTypes] : arrayTypes.split(',');
+                if (arrayTypes.length == 1) res = [];
+                //group by name
+                var prefix = name + "[";
+                var groups = {};
+                //make a copy just in case
+                arr = arr.concat();
+                for (var i = 0; i < arr.length;) {
+                    if (arr[i].name.indexOf(prefix) === 0) {
+                        var key = arr[i].name.substring(0, arr[i].name.indexOf(']', prefix.length) + 1);
+                        if (!groups[key]) groups[key] = [arr[i]];
+                        else groups[key].push(arr[i]);
+                        arr.splice(i, 1);
+                    }
+                    else i++;
+                }                
+                for (var key in groups) {
+                    if (arrayTypes.length == 1) {
+                        res.push(toRequest(key, groups[key], arrayTypes[0], dataContracts));
+                    } else {
+                        var k = "";                        
+                        //its a bunch of key-value pairs
+                        for (var i = 0; i < groups[key].length; i++) {
+                            if (groups[key][i].name == key + ".Key") k = groups[key][i].value;
+                        }
+                        if (k) {
+                            var nName = key + ".Value";
+                            res[k] = toRequest(nName, groups[key].filter(function(pn) { return pn.name.indexOf(nName) === 0 }),arrayTypes[1],dataContracts);                        
+                        }
+                    }
+                }
+                //also consider keyvalue pairs where name of textbox is object.key (rather than object[i])
+                //this could possibly be extended to allow dictionaries of objects with dataContracts
+                //at the moment we only support dictionaries of numeric/string/enum types
+                prefix = name + ".";               
+                for (var i = 0; i < arr.length;i++) {
+                    if (arr[i].name.indexOf(prefix) === 0) {
+                        var key = arr[i].name.substring(prefix.length);
+                        if (key.replace(/\\./g, '#').indexOf('.') === -1) { //allow for encoded dots, but there should be no nesting at this level
+                            res[key.replace(/\\./g, '.')] = toRequest(arr[i].name, [arr[i]], arrayTypes[1], dataContracts);
+                        }
+                    }                    
+                }
+            } else {
+                var contract = dataContracts[dataType];
+                if (contract) {
+                    for (var propName in contract.Properties) {
+                        var nType = contract.Properties[propName];
+                        var nName = name + "." + propName;                      
+                        var n = toRequest(nName,arr.filter(function(pn) { return pn.name.indexOf(nName) === 0 }),nType,dataContracts);
+                        if (n != null) res[propName] = n;
+                    }
+                } else {
+                    return arr[0].value;                  
+                }
+            }
+            return res;
+        }
+
+        function HandleFormSubmit(form, desc, dataContracts) {
+            var res = $(form).find(".form-result");
+            form.ajaxForm({
+                beforeSubmit: function(arr, $form) {
+                    //convert the flat dataStructure into a dataContract javascript object 
+                    res.closest("tr").hide(); res.empty(); $("#busy_overlay").show();
+                    var data = {};
+                    for (var argName in desc.args) {
+                        data[argName] = toRequest(argName, arr.filter(function (pn) { return pn.name.indexOf(argName) === 0 }), desc.args[argName], dataContracts);
+                    }
+                    var method = $form.prop("method"); 
+                    $.ajax({
+                        url: $form.prop("action"),
+                        type: method,
+                        dataType:'json',
+                        data: method.toLowerCase() == "get"? data : JSON.stringify(data),
+                        contentType: "application/json; charset=utf-8",
+                        timeout: 12000,                
+                        success: function (o) {
+                            //check objectInstance could be an error
+                            if (o == null) {
+                                if (!desc.returns) res.text("Success");
+                                res.closest("tr").show();
+                                return;
+                            }
+                            if (o.Success === false && o.InvocationErrorType) { //check for an invocation error
+                                res.append("<h3 class='error'>" + o.Message + "<h3>");
+                                if (o.Exception) res.append(BuildStackTrace(o.Exception));
+                                //have an expandable stacktrace??
+                            } else {
+                                res.append(BuildUpResult(o, desc.returns, dataContracts));
+                            }
+                        },
+                        error: function ($xhr, status) { 
+                            if (($xhr.responseText || "").startsWith("{")) { //there may be some details with the error message 
+                                var o = $.parseJSON($xhr.responseText);
+                                if (o.Success === false && o.InvocationErrorType) {
+                                    res.append("<h3 class='error'>" + o.Message + "<h3>");
+                                    if (o.Exception) res.append(BuildStackTrace(o.Exception));
+                                    return;
+                                }                                
+                            }
+                            //it probably timed out..
+                            console.log("Failed to invoke web method!", $xhr, status);
+                            res.append("<div class='error'>Failed to invoke web method ("+status+")</div>");                            
+                        },                     
+                        complete: function () {
+                            res.closest("tr").show();
+                            $("#busy_overlay").hide();
+                            var timesperminute = parseInt($form.find(".timesperminute").val());
+                            if (timesperminute >= 1 && timesperminute < 6000) {
+                                setTimeout(function () { $form.submit(); }, 60000 / timesperminute);
+                            }
+                        }
+                    });
+                    return false; //otherwise we get 2 ajax calls!
+                }
+            });                            
+        }
+
+        function BuildStackTrace(ex) {
+            var table = $("<table class='error'><tr><td rowspan='2'>&nbsp;</td><td><pre></pre></td></tr><tr class='inner'></tr></table>");
+            table.find("pre").text(ex.StackTrace);
+            if (ex.CalledBy) {
+                $(table).find(".inner").append(BuildStackTrace(ex.CalledBy));
+            }
+            return table;
+        }
+    </script>
+</body>
+
+</html>
